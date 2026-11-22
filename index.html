@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#d6336c">
+<title>Toppere A4</title>
+<style>
+  :root { --ink:#222; --muted:#6b6b6b; --line:#e3e0dc; --accent:#d6336c; --bg:#f6f3ef; --card:#fff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,"Segoe UI",Roboto,sans-serif; color:var(--ink); background:var(--bg); }
+  header { background:var(--accent); color:#fff; padding:14px 16px; }
+  header h1 { margin:0; font-size:20px; }
+  main { max-width:560px; margin:0 auto; padding:12px 16px 40px; }
+  .card { background:var(--card); border-radius:14px; padding:14px 16px 16px; margin:0 0 14px; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  h2 { font-size:17px; margin:0 0 6px; }
+  .hint { color:var(--muted); font-size:14px; margin:4px 0 10px; line-height:1.4; }
+  .btn { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; font:inherit; font-size:17px; font-weight:600;
+         padding:13px 14px; border-radius:12px; border:0; background:var(--accent); color:#fff; cursor:pointer; margin:8px 0 0; }
+  .btn.ghost { background:#fff; color:var(--ink); border:1px solid #ccc; font-weight:500; }
+  .btn[aria-disabled=true], .btn:disabled { opacity:.5; pointer-events:none; }
+  .status { font-size:15px; margin-top:10px; min-height:1.2em; }
+  .status.err { color:#b02a37; }
+  .bar { height:6px; background:#eee; border-radius:3px; overflow:hidden; margin-top:6px; }
+  .bar > div { height:100%; width:0; background:var(--accent); transition:width .2s; }
+  .pieces { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+  .piece { position:relative; background:repeating-conic-gradient(#f1f1f1 0 25%, #fff 0 50%) 0 0/14px 14px; border:1px solid var(--line);
+           border-radius:10px; aspect-ratio:1; display:flex; align-items:center; justify-content:center; padding:4px; }
+  .piece img { max-width:100%; max-height:100%; }
+  .piece button { position:absolute; top:-7px; right:-7px; width:28px; height:28px; border-radius:50%; border:0; background:#333; color:#fff;
+                  font-size:15px; line-height:28px; padding:0; cursor:pointer; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  label.f { display:block; font-size:14px; color:var(--muted); margin:6px 0 4px; }
+  .stepper { display:flex; align-items:center; border:1px solid #ccc; border-radius:10px; overflow:hidden; }
+  .stepper button { width:44px; height:44px; border:0; background:#f3f3f3; font-size:22px; cursor:pointer; }
+  .stepper output { flex:1; text-align:center; font-size:18px; font-weight:600; }
+  select { width:100%; font:inherit; font-size:16px; padding:10px; border:1px solid #ccc; border-radius:10px; background:#fff; }
+  canvas#sheet { width:100%; height:auto; display:block; margin-top:12px; border:1px solid var(--line); box-shadow:0 2px 10px rgba(0,0,0,.08); background:#fff; }
+  .row2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  details { font-size:14px; color:var(--muted); margin-top:12px; }
+  details li { margin:3px 0; }
+</style>
+</head>
+<body>
+<header><h1>🎂 Toppere A4</h1></header>
+<main>
+  <section class="card">
+    <h2>1. Pozele</h2>
+    <p class="hint">Alege capturi de pe Pinterest sau pozele primite. Aplicația decupează singură fiecare desen și scoate fundalul.</p>
+    <label class="btn" id="pickBtn"><input type="file" id="files" accept="image/*" multiple hidden>📷 Alege pozele</label>
+    <div class="status" id="status">Prima dată se descarcă unealta de decupat (cam 40 MB). Folosește Wi-Fi.</div>
+    <div class="bar"><div id="barFill"></div></div>
+  </section>
+
+  <section class="card" id="step2" hidden>
+    <h2>2. Ce am găsit (<span id="count">0</span>)</h2>
+    <p class="hint">Apasă ✕ pe ce nu vrei pe foaie (bucăți greșite, butoane, text).</p>
+    <div class="pieces" id="pieces"></div>
+    <button class="btn ghost" id="clearAll" type="button">Șterge tot și începe din nou</button>
+  </section>
+
+  <section class="card" id="step3" hidden>
+    <h2>3. Foaia A4</h2>
+    <div class="grid2">
+      <div><label class="f">Rânduri</label><div class="stepper"><button type="button" data-step="rows:-1">−</button><output id="rowsOut">4</output><button type="button" data-step="rows:1">+</button></div></div>
+      <div><label class="f">Coloane</label><div class="stepper"><button type="button" data-step="cols:-1">−</button><output id="colsOut">4</output><button type="button" data-step="cols:1">+</button></div></div>
+      <div><label class="f" for="outline">Contur alb</label>
+        <select id="outline"><option value="0">Fără</option><option value="0.02">Subțire</option><option value="0.035" selected>Normal</option><option value="0.05">Gros</option></select></div>
+      <div><label class="f" for="margin">Margine foaie</label>
+        <select id="margin"><option value="0">0 mm</option><option value="5">5 mm</option><option value="8" selected>8 mm</option><option value="12">12 mm</option></select></div>
+    </div>
+    <p class="hint" id="info"></p>
+    <canvas id="sheet" width="2480" height="3508"></canvas>
+    <button class="btn ghost" id="shuffle" type="button">🔀 Amestecă</button>
+    <div class="row2">
+      <button class="btn" id="share" type="button">📤 Trimite</button>
+      <button class="btn" id="download" type="button">⬇️ Salvează</button>
+    </div>
+    <details>
+      <summary>Cum printez pe calculator?</summary>
+      <ul>
+        <li>Trimite poza pe calculator (WhatsApp, e-mail).</li>
+        <li>Deschide-o și apasă Print.</li>
+        <li>Hârtie: A4. Margini: fără. Alege „Potrivire la pagină” (poza are exact mărimea A4).</li>
+        <li>Fă întâi o probă pe hârtie normală.</li>
+      </ul>
+    </details>
+  </section>
+</main>
+<script>
+  // Turn on the helper that lets the cut-out use several processor cores (reloads the page once, the first time).
+  if ("serviceWorker" in navigator && !window.crossOriginIsolated) {
+    navigator.serviceWorker.register("sw.js").then(() => navigator.serviceWorker.ready).then(() => {
+      try {
+        if (!sessionStorage.getItem("sw-reloaded")) { sessionStorage.setItem("sw-reloaded", "1"); location.reload(); }
+      } catch (e) {}
+    }).catch(() => {});
+  }
+</script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

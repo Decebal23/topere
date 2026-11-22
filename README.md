@@ -3,8 +3,9 @@
 A phone web app that turns screenshots (Pinterest, pictures from family) into a print-ready A4 sheet of cake toppers.
 
 1. Pick one or more screenshots. The app finds each picture, cuts it out and removes the background, all on the phone.
-2. Tap ✕ on anything that shouldn't be on the sheet.
-3. Choose rows × columns (default 4 × 4). With fewer pictures than slots they repeat, mixed so the same one isn't side by side.
+2. Tap a cut-out to put a copy on the sheet (as many times as wanted); ✕ removes it from the list.
+3. On the sheet: drag to move; tap a topper to select it, then the pink corner dot resizes it and ✕ deletes it. Toppers that touch turn red.
+   "Umple automat" fills rows × columns (default 4 × 4); with fewer pictures than slots they repeat, mixed so the same one isn't side by side.
 4. Share or save the PNG: exactly A4 at 300 DPI, white sticker outline around each picture.
 
 Optional first step, **Caută modele**: pick a photo of a cake and an on-phone AI (CLIP) guesses the theme (from a fixed list) and the style (realistic or cartoon). She can correct it or type her own theme, then the app opens Google Images (transparent backgrounds) or Pinterest with English search words. She saves the pictures she likes and picks them at step 1.

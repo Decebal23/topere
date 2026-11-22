@@ -6,7 +6,7 @@ const MM = 300 / 25.4;                 // pixels per mm
 const GAP_MM = 2;
 
 const $ = id => document.getElementById(id);
-const state = { pieces: [], order: [], rows: 4, cols: 4, cache: new Map() };
+const state = { pieces: [], items: [], sel: -1, rows: 4, cols: 4, cache: new Map() };
 let nextId = 1, bgLib = null, busy = false;
 
 /* ---------- settings ---------- */
@@ -61,6 +61,13 @@ async function processFiles(files) {
         const masked = canvas(r.w, r.h), mx = masked.getContext("2d");
         mx.drawImage(cut, 0, 0, r.w, r.h);
         if (r.mask) { mx.globalCompositeOperation = "destination-in"; mx.drawImage(r.mask, 0, 0, r.w, r.h); }
+        if (r.solid) {
+          // Put back anything that isn't background colour, in case the AI removed part of the picture.
+          const keep = canvas(r.w, r.h), kx = keep.getContext("2d");
+          kx.drawImage(crop, 0, 0);
+          kx.globalCompositeOperation = "destination-in"; kx.drawImage(r.solid, 0, 0, r.w, r.h);
+          mx.globalCompositeOperation = "source-over"; mx.drawImage(keep, 0, 0);
+        }
         for (const c of splitAlpha(masked)) { state.pieces.push({ id: nextId++, canvas: c, thumb: thumb(c) }); added++; }
       }
     } catch (e) {
@@ -73,8 +80,8 @@ async function processFiles(files) {
   bar(0); setBusy(false);
   const failText = failed ? ` ${failed} ${failed === 1 ? "poză nu a mers" : "poze nu au mers"}; încearcă-le din nou.` : "";
   status((added ? `Gata: am găsit ${added} desene.` : "Nu am găsit niciun desen.") + failText, !added || failed > 0);
-  state.order = [];
-  renderPieces(); renderSheet();
+  renderPieces();
+  if (!state.items.length && state.pieces.length) autoFill(false, false); else renderSheet();
 }
 
 function onProgress(key, cur, total) {
@@ -104,17 +111,18 @@ function findRegions(orig) {
 
   const fg = new Uint8Array(n);
   for (let i = 0; i < n; i++) fg[i] = bg[i] ? 0 : 1;
-  // Tall phone screenshot: ignore the status bar at the top and the app's buttons at the bottom.
-  const phone = H / W > 1.6, top = phone ? Math.round(h * 0.05) : 0, bottom = phone ? Math.round(h * 0.835) : h;
-  if (phone) { fg.fill(0, 0, top * w); fg.fill(0, bottom * w); }
-  const { lab, comps } = label(erode(fg, w, h, 1), w, h);
+  // Tall phone screenshot: ignore the status bar and the app's buttons when looking for pictures.
+  // shortcut: a picture reaching into the bottom 16.5% gets cropped there; fine for Pinterest screenshots so far.
+  if (H / W > 1.6) { fg.fill(0, 0, Math.round(h * 0.05) * w); fg.fill(0, Math.round(h * 0.835) * w); }
+  const core = erode(fg, w, h, 1);
+  const { lab, comps } = label(core, w, h);
   let biggest = 0;
   for (const c of comps) if (c.area > biggest) biggest = c.area;
   const keep = comps.filter(c => c.area >= biggest * 0.04 && c.area >= n * 0.002);
   if (!keep.length) return whole;
   dropUnkept(lab, keep);
+  const own = lab.slice();   // each picture's own shape, before it takes over nearby pixels
   grow(lab, w, h);
-  if (phone) { lab.fill(0, 0, top * w); lab.fill(0, bottom * w); }
   boxes(lab, fg, w, keep);
 
   return sortReading(keep, h).map(c => {
@@ -122,11 +130,18 @@ function findRegions(orig) {
     const bx0 = Math.max(0, c.x0 - pad), by0 = Math.max(0, c.y0 - pad);
     const bx1 = Math.min(w - 1, c.x1 + pad), by1 = Math.min(h - 1, c.y1 + pad);
     const bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
+    // mask: this picture's share of the screenshot; solid: its own main shape (not background colour, no nearby icons).
     const m = canvas(bw, bh), mx = m.getContext("2d"), md = mx.createImageData(bw, bh);
-    for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) if (lab[(by0 + y) * w + bx0 + x] === c.id) md.data[(y * bw + x) * 4 + 3] = 255;
-    mx.putImageData(md, 0, 0);
+    const sm = canvas(bw, bh), smx = sm.getContext("2d"), sd = smx.createImageData(bw, bh);
+    for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+      const i = (by0 + y) * w + bx0 + x;
+      if (lab[i] !== c.id) continue;
+      md.data[(y * bw + x) * 4 + 3] = 255;
+      if (core[i] && own[i] === c.id) sd.data[(y * bw + x) * 4 + 3] = 255;
+    }
+    mx.putImageData(md, 0, 0); smx.putImageData(sd, 0, 0);
     const X = Math.floor(bx0 / s), Y = Math.floor(by0 / s);
-    return { x: X, y: Y, w: Math.min(W - X, Math.ceil(bw / s)), h: Math.min(H - Y, Math.ceil(bh / s)), mask: m };
+    return { x: X, y: Y, w: Math.min(W - X, Math.ceil(bw / s)), h: Math.min(H - Y, Math.ceil(bh / s)), mask: m, solid: sm };
   });
 }
 
@@ -315,21 +330,29 @@ function renderPieces() {
   $("step2").hidden = !state.pieces.length;
   $("count").textContent = state.pieces.length;
   $("pieces").innerHTML = state.pieces.map(p =>
-    `<div class="piece"><img src="${p.thumb}" alt=""><button type="button" data-del="${p.id}" aria-label="Scoate">✕</button></div>`).join("");
+    `<div class="piece"><button type="button" class="add" data-add="${p.id}" aria-label="Pune pe foaie"><img src="${p.thumb}" alt=""></button><button type="button" class="del" data-del="${p.id}" aria-label="Scoate">✕</button></div>`).join("");
 }
 $("pieces").addEventListener("click", e => {
+  const add = e.target.closest("[data-add]");
+  if (add) { addItem(+add.dataset.add); return; }
   const b = e.target.closest("[data-del]"); if (!b) return;
   const id = +b.dataset.del;
   state.pieces = state.pieces.filter(p => p.id !== id);
-  state.order = [];
+  state.items = state.items.filter(it => it.id !== id);
+  state.sel = -1;
   renderPieces(); renderSheet();
 });
 $("clearAll").addEventListener("click", () => {
-  state.pieces = []; state.order = []; state.cache.clear();
+  state.pieces = []; state.items = []; state.sel = -1; state.cache.clear();
   renderPieces(); renderSheet(); status("Alege pozele din nou.");
 });
 
 /* ---------- 3. A4 sheet ---------- */
+// Each topper on the sheet: { id: piece id, x, y, w } in A4 pixels; its height follows the sticker's shape.
+const byId = id => state.pieces.find(p => p.id === id);
+const ratio = () => +$("outline").value;
+const itemH = it => { const s = sticker(byId(it.id), ratio()); return it.w * s.height / s.width; };
+
 // Fill rows*cols slots. With fewer pictures than slots they repeat, avoiding the same picture next to itself.
 function arrange(random) {
   const ids = state.pieces.map(p => p.id), N = state.rows * state.cols;
@@ -353,11 +376,33 @@ function arrange(random) {
   return shuffle(pool);
 }
 
-function sticker(p, cw, ch, ratio) {
-  const key = `${p.id}|${cw}|${ch}|${ratio}`;
+function autoFill(random, ask = true) {
+  if (ask && state.items.length && !confirm("Înlocuiesc toppere de pe foaie cu o grilă nouă?")) return;
+  const m = +$("margin").value * MM, g = GAP_MM * MM;
+  const cw = (A4W - 2 * m - (state.cols - 1) * g) / state.cols, ch = (A4H - 2 * m - (state.rows - 1) * g) / state.rows;
+  state.items = arrange(random).map((id, i) => {
+    const s = sticker(byId(id), ratio()), k = Math.min(cw / s.width, ch / s.height), w = s.width * k, h = s.height * k;
+    const cx = m + (i % state.cols) * (cw + g), cy = m + Math.floor(i / state.cols) * (ch + g);
+    return { id, x: cx + (cw - w) / 2, y: cy + (ch - h) / 2, w };
+  });
+  state.sel = -1;
+  renderSheet();
+}
+
+function addItem(id) {
+  const w = (A4W - 2 * +$("margin").value * MM) / 4, n = state.items.length % 8;
+  state.items.push({ id, x: A4W / 2 - w / 2 + n * 60, y: A4H / 3 + n * 60, w });
+  state.sel = state.items.length - 1;
+  renderSheet();
+  $("sheet").scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+// One sticker image per picture (white outline + thin grey cut line), drawn at any size on the sheet.
+function sticker(p, ratio) {
+  const key = `${p.id}|${ratio}`;
   if (state.cache.has(key)) return state.cache.get(key);
-  const o = Math.round(Math.min(cw, ch) * ratio), line = o ? 3 : 0, pad = o + line + 2;
-  const k = Math.min((cw - 2 * pad) / p.canvas.width, (ch - 2 * pad) / p.canvas.height);
+  const BOX = 1200, o = Math.round(BOX * ratio), line = o ? 3 : 0, pad = o + line + 2;
+  const k = Math.min((BOX - 2 * pad) / p.canvas.width, (BOX - 2 * pad) / p.canvas.height);
   const iw = Math.max(1, Math.round(p.canvas.width * k)), ih = Math.max(1, Math.round(p.canvas.height * k));
   const c = canvas(iw + 2 * pad, ih + 2 * pad), x = c.getContext("2d");
   x.imageSmoothingQuality = "high";
@@ -378,45 +423,108 @@ function sticker(p, cw, ch, ratio) {
     x.drawImage(white, pad, pad);
   }
   x.drawImage(p.canvas, pad, pad, iw, ih);
+  const red = canvas(c.width, c.height), rx = red.getContext("2d");
+  rx.drawImage(c, 0, 0); rx.globalCompositeOperation = "source-in"; rx.fillStyle = "#e03131"; rx.fillRect(0, 0, c.width, c.height);
+  c.red = red;
   state.cache.set(key, c);
   return c;
 }
 
-function renderSheet() {
-  $("rowsOut").textContent = state.rows; $("colsOut").textContent = state.cols;
-  $("step3").hidden = !state.pieces.length;
-  if (!state.pieces.length) return;
-  const N = state.rows * state.cols;
-  const known = new Set(state.pieces.map(p => p.id));
-  if (state.order.length !== N || state.order.some(id => !known.has(id))) state.order = arrange(false);
+// Which toppers touch another one: checked on a 1/8-size copy of the sheet, by their real shapes.
+function overlapping() {
+  const S = 8, L = canvas(A4W / S, A4H / S), lx = L.getContext("2d", { willReadFrequently: true });
+  const owner = new Int16Array(L.width * L.height).fill(-1), hit = new Set();
+  state.items.forEach((it, i) => {
+    const h = itemH(it);
+    const x0 = Math.max(0, Math.floor(it.x / S)), y0 = Math.max(0, Math.floor(it.y / S));
+    const x1 = Math.min(L.width, Math.ceil((it.x + it.w) / S)), y1 = Math.min(L.height, Math.ceil((it.y + h) / S));
+    if (x1 <= x0 || y1 <= y0) return;
+    lx.clearRect(0, 0, L.width, L.height);
+    lx.drawImage(sticker(byId(it.id), ratio()), it.x / S, it.y / S, it.w / S, h / S);
+    const d = lx.getImageData(x0, y0, x1 - x0, y1 - y0).data, bw = x1 - x0;
+    for (let k = 3, p = 0; k < d.length; k += 4, p++) {
+      if (d[k] < 100) continue;
+      const at = (y0 + Math.floor(p / bw)) * L.width + x0 + (p % bw);
+      if (owner[at] >= 0 && owner[at] !== i) { hit.add(owner[at]); hit.add(i); }
+      owner[at] = i;
+    }
+  });
+  return hit;
+}
 
+function draw(forPrint) {
   const c = $("sheet"), x = c.getContext("2d");
   x.fillStyle = "#fff"; x.fillRect(0, 0, A4W, A4H);
-  const m = +$("margin").value * MM, g = GAP_MM * MM, ratio = +$("outline").value;
-  const cw = Math.floor((A4W - 2 * m - (state.cols - 1) * g) / state.cols);
-  const ch = Math.floor((A4H - 2 * m - (state.rows - 1) * g) / state.rows);
-  const byId = new Map(state.pieces.map(p => [p.id, p]));
-  state.order.forEach((id, i) => {
-    const r = Math.floor(i / state.cols), col = i % state.cols, st = sticker(byId.get(id), cw, ch, ratio);
-    const cx = m + col * (cw + g), cy = m + r * (ch + g);
-    x.drawImage(st, Math.round(cx + (cw - st.width) / 2), Math.round(cy + (ch - st.height) / 2));
+  const hit = forPrint ? new Set() : overlapping();
+  state.items.forEach((it, i) => {
+    const s = sticker(byId(it.id), ratio()), h = itemH(it);
+    x.drawImage(s, it.x, it.y, it.w, h);
+    if (hit.has(i)) { x.globalAlpha = 0.5; x.drawImage(s.red, it.x, it.y, it.w, h); x.globalAlpha = 1; }
   });
-
-  const n = state.pieces.length;
-  const size = `Fiecare topper are cel mult ${(cw / MM / 10).toFixed(1)} × ${(ch / MM / 10).toFixed(1)} cm.`;
-  $("info").textContent = n > N
-    ? `Ai ${n} desene, dar încap ${N}. Apar primele ${N}; scoate ce nu vrei sau pune mai multe rânduri. ${size}`
-    : n < N ? `${n} desene repetate pe ${N} locuri. ${size}` : `${N} desene. ${size}`;
+  const it = state.items[state.sel];
+  if (!forPrint && it) {
+    const h = itemH(it), R = handleR();
+    x.setLineDash([24, 16]); x.lineWidth = 6; x.strokeStyle = "#d6336c"; x.strokeRect(it.x, it.y, it.w, h); x.setLineDash([]);
+    x.fillStyle = "#d6336c"; x.beginPath(); x.arc(it.x + it.w, it.y + h, R * 0.6, 0, 7); x.fill();
+    x.fillStyle = "#333"; x.beginPath(); x.arc(it.x + it.w, it.y, R * 0.6, 0, 7); x.fill();
+    x.strokeStyle = "#fff"; x.lineWidth = R * 0.12; const d = R * 0.25;
+    x.beginPath(); x.moveTo(it.x + it.w - d, it.y - d); x.lineTo(it.x + it.w + d, it.y + d);
+    x.moveTo(it.x + it.w + d, it.y - d); x.lineTo(it.x + it.w - d, it.y + d); x.stroke();
+  }
+  return hit;
 }
+
+function renderSheet() {
+  $("rowsOut").textContent = state.rows; $("colsOut").textContent = state.cols;
+  $("fillBtn").textContent = `▦ Umple automat (${state.rows} × ${state.cols})`;
+  $("step3").hidden = !state.pieces.length;
+  if (!state.pieces.length) return;
+  const hit = draw(false), n = state.items.length;
+  $("info").textContent = (n ? `${n} toppere pe foaie. Atinge unul ca să-l muți, să-l mărești (punctul din colț) sau să-l ștergi (✕).` : "Foaia e goală: atinge un desen de mai sus sau „Umple automat”.")
+    + (hit.size ? ` ⚠ ${hit.size} toppere se ating (marcate cu roșu).` : "");
+  $("info").classList.toggle("warn", hit.size > 0);
+}
+
+// Touch / mouse on the sheet: select, move, resize, delete.
+const handleR = () => { const r = $("sheet").getBoundingClientRect(); return 22 * A4W / (r.width || A4W); };
+function toSheet(e) { const r = $("sheet").getBoundingClientRect(); return [(e.clientX - r.left) * A4W / r.width, (e.clientY - r.top) * A4H / r.height]; }
+let drag = null, frame = 0;
+$("sheet").addEventListener("pointerdown", e => {
+  const [px, py] = toSheet(e), R = handleR(), near = (ax, ay) => Math.hypot(px - ax, py - ay) < R;
+  const sel = state.items[state.sel];
+  if (sel) {
+    const h = itemH(sel);
+    if (near(sel.x + sel.w, sel.y)) { state.items.splice(state.sel, 1); state.sel = -1; renderSheet(); return; }
+    if (near(sel.x + sel.w, sel.y + h)) { drag = { mode: "resize" }; $("sheet").setPointerCapture(e.pointerId); return; }
+  }
+  let i = state.items.length - 1;
+  while (i >= 0) { const it = state.items[i]; if (px >= it.x && px <= it.x + it.w && py >= it.y && py <= it.y + itemH(it)) break; i--; }
+  if (i < 0) { state.sel = -1; renderSheet(); return; }
+  const [it] = state.items.splice(i, 1);   // bring to front
+  state.items.push(it); state.sel = state.items.length - 1;
+  drag = { mode: "move", dx: px - it.x, dy: py - it.y };
+  $("sheet").setPointerCapture(e.pointerId);
+  renderSheet();
+});
+$("sheet").addEventListener("pointermove", e => {
+  const it = state.items[state.sel];
+  if (!drag || !it) return;
+  const [px, py] = toSheet(e);
+  if (drag.mode === "move") { it.x = px - drag.dx; it.y = py - drag.dy; }
+  else it.w = Math.max(100, px - it.x);
+  if (!frame) frame = requestAnimationFrame(() => { frame = 0; renderSheet(); });
+});
+for (const ev of ["pointerup", "pointercancel"]) $("sheet").addEventListener(ev, () => { drag = null; });
 
 document.querySelectorAll("[data-step]").forEach(b => b.addEventListener("click", () => {
   const [k, d] = b.dataset.step.split(":");
   state[k] = Math.max(1, Math.min(8, state[k] + +d));
-  state.order = []; saveSettings(); renderSheet();
+  saveSettings(); renderSheet();
 }));
 $("outline").addEventListener("change", () => { saveSettings(); renderSheet(); });
-$("margin").addEventListener("change", () => { saveSettings(); renderSheet(); });
-$("shuffle").addEventListener("click", () => { state.order = arrange(true); renderSheet(); });
+$("margin").addEventListener("change", saveSettings);
+$("fillBtn").addEventListener("click", () => autoFill(false));
+$("shuffle").addEventListener("click", () => autoFill(true));
 
 /* ---------- export ---------- */
 // Add a pHYs chunk so the PNG says 300 DPI (prints as A4 at 100%).
@@ -430,7 +538,9 @@ function crc32(bytes) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 async function sheetBlob() {
+  draw(true);   // without selection marks or red overlap marks
   const blob = await new Promise(r => $("sheet").toBlob(r, "image/png"));
+  renderSheet();
   const src = new Uint8Array(await blob.arrayBuffer());
   const chunk = new Uint8Array(21), dv = new DataView(chunk.buffer);
   dv.setUint32(0, 9); chunk.set([112, 72, 89, 115], 4);              // "pHYs"
@@ -510,5 +620,5 @@ updateSearch();
 
 /* ---------- start ---------- */
 $("files").addEventListener("change", e => { const f = [...e.target.files]; e.target.value = ""; processFiles(f); });
-window.__toppere = { processFiles, state, sheetBlob };   // used for testing
+window.__toppere = { processFiles, state, sheetBlob, itemH };   // used for testing
 renderSheet();

@@ -18,7 +18,11 @@ self.addEventListener("fetch", e => {
   }
   if (new URL(req.url).origin !== self.location.origin) return;
   if (req.cache === "only-if-cached" && req.mode !== "same-origin") return;
-  e.respondWith(fetch(req).then(res => {
+  // no-cache: always ask GitHub whether a file changed (a quick "not modified" if not), so updates
+  // show on the next open instead of after GitHub's 10-minute cache time.
+  // Page loads themselves keep the normal fetch (it handles the /topere → /topere/ redirect).
+  const fresh = req.method === "GET" && req.mode !== "navigate" ? fetch(req.url, { cache: "no-cache", credentials: "same-origin" }) : fetch(req);
+  e.respondWith(fresh.then(res => {
     if (!res || res.status === 0) return res;
     const headers = new Headers(res.headers);
     headers.set("Cross-Origin-Embedder-Policy", "credentialless");

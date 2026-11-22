@@ -68,7 +68,7 @@ async function processFiles(files) {
           kx.globalCompositeOperation = "destination-in"; kx.drawImage(r.solid, 0, 0, r.w, r.h);
           mx.globalCompositeOperation = "source-over"; mx.drawImage(keep, 0, 0);
         }
-        for (const c of splitAlpha(masked)) { state.pieces.push({ id: nextId++, canvas: c, thumb: thumb(c) }); added++; }
+        for (const c of splitAlpha(masked, !!r.mask)) { state.pieces.push({ id: nextId++, canvas: c, thumb: thumb(c) }); added++; }
       }
     } catch (e) {
       console.error(e);
@@ -118,8 +118,27 @@ function findRegions(orig) {
   const { lab, comps } = label(core, w, h);
   let biggest = 0;
   for (const c of comps) if (c.area > biggest) biggest = c.area;
-  const keep = comps.filter(c => c.area >= biggest * 0.04 && c.area >= n * 0.002);
+  let keep = comps.filter(c => c.area >= biggest * 0.04 && c.area >= n * 0.002);
   if (!keep.length) return whole;
+  // A piece lying mostly inside another piece's box is part of the same picture (white icing on a
+  // cookie's edge looks like background and slices a leg off), so merge it into the bigger one.
+  keep.sort((a, b) => b.area - a.area);
+  const into = new Map();
+  for (let i = keep.length - 1; i > 0; i--) {
+    const a = keep[i], box = c => (c.x1 - c.x0 + 1) * (c.y1 - c.y0 + 1);
+    for (let j = 0; j < i; j++) {
+      const b = keep[j];
+      const ow = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) + 1, oh = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) + 1;
+      if (ow > 0 && oh > 0 && ow * oh > 0.5 * box(a)) {
+        into.set(a.id, b.id);
+        b.x0 = Math.min(b.x0, a.x0); b.y0 = Math.min(b.y0, a.y0); b.x1 = Math.max(b.x1, a.x1); b.y1 = Math.max(b.y1, a.y1);
+        break;
+      }
+    }
+  }
+  const root = id => { while (into.has(id)) id = into.get(id); return id; };
+  if (into.size) for (let i = 0; i < n; i++) if (into.has(lab[i])) lab[i] = root(lab[i]);
+  keep = keep.filter(c => !into.has(c.id));
   dropUnkept(lab, keep);
   const own = lab.slice();   // each picture's own shape, before it takes over nearby pixels
   grow(lab, w, h);
@@ -174,7 +193,8 @@ function backgroundMask(op, w, h) {
 }
 
 // Step B: after the AI cut-out, split anything still stuck together.
-function splitAlpha(c) {
+// single: the picture was already separated by background colour, so keep it whole (never split off a leg or a tail).
+function splitAlpha(c, single) {
   const W = c.width, H = c.height, s = Math.min(1, 700 / Math.max(W, H));
   const w = Math.max(1, Math.round(W * s)), h = Math.max(1, Math.round(H * s)), n = w * h;
   const sc = canvas(w, h), sx = sc.getContext("2d", { willReadFrequently: true });
@@ -182,20 +202,18 @@ function splitAlpha(c) {
   const px = sx.getImageData(0, 0, w, h).data;
   const solid = new Uint8Array(n);
   for (let i = 0; i < n; i++) solid[i] = px[i * 4 + 3] > 100 ? 1 : 0;
-  // Shrink by more and more until overlapping pictures come apart; keep the split with the most real pieces.
-  let best = null;
-  for (const r of [3, 7, 12]) {
-    const res = label(erode(solid, w, h, r), w, h);
+  let lab, keep;
+  if (single) { lab = new Int32Array(n).fill(1); keep = [{ id: 1 }]; }
+  else {
+    // Busy background: shrink a little so pictures that touch come apart.
+    ({ lab, comps: keep } = label(erode(solid, w, h, 3), w, h));
     let biggest = 0;
-    for (const k of res.comps) if (k.area > biggest) biggest = k.area;
-    // Stronger shrinking only counts pieces that are close to full size, so a tail never becomes its own picture.
-    res.keep = res.comps.filter(k => k.area >= biggest * (r === 3 ? 0.2 : 0.35) && k.area >= n * 0.002);
-    if (!best || res.keep.length > best.keep.length) best = res;
+    for (const k of keep) if (k.area > biggest) biggest = k.area;
+    keep = keep.filter(k => k.area >= biggest * 0.2 && k.area >= n * 0.002);
+    if (!keep.length) return [];
+    dropUnkept(lab, keep);
+    grow(lab, w, h);
   }
-  const { lab, keep } = best;
-  if (!keep.length) return [];
-  dropUnkept(lab, keep);
-  grow(lab, w, h);
   // Throw away small loose bits (pieces of app icons, specks) that don't touch a picture.
   const loose = label(solid, w, h);
   let maxArea = 0;

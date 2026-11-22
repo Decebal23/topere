@@ -128,7 +128,9 @@
   </section>
 </main>
 <script>
-  // Turn on the helper that lets the cut-out use several processor cores (reloads the page once, the first time).
+  // Ask the phone not to clear the stored AI models when space runs low.
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  // Turn on the helper that lets the cut-out use several processor cores and keeps the model stored (reloads the page once, the first time).
   if ("serviceWorker" in navigator && !window.crossOriginIsolated) {
     navigator.serviceWorker.register("sw.js").then(() => navigator.serviceWorker.ready).then(() => {
       try {

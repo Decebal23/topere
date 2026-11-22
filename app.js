@@ -86,7 +86,7 @@ async function processFiles(files) {
 
 function onProgress(key, cur, total) {
   if (key.startsWith("fetch") && total) {
-    status(`Se descarcă unealta de decupat (doar prima dată)… ${Math.round(cur / total * 100)}%`);
+    status(`Pregătesc unealta de decupat… ${Math.round(cur / total * 100)}%`);
     bar(cur / total);
   }
 }
@@ -600,7 +600,7 @@ $("cakePhoto").addEventListener("change", async e => {
   try {
     const { guess } = await import("./theme.js");
     const res = await guess(file, p => {
-      if (p.status === "progress" && /\.onnx$/.test(p.file || "")) st.textContent = `Se descarcă unealta care recunoaște tema (doar prima dată)… ${Math.round(p.progress)}%`;
+      if (p.status === "progress" && /\.onnx$/.test(p.file || "")) st.textContent = `Pregătesc unealta care recunoaște tema… ${Math.round(p.progress)}%`;
     });
     guessed = res.themes.slice(0, 3);
     const top = guessed[0];

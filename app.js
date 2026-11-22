@@ -42,14 +42,15 @@ async function processFiles(files) {
   try { lib = await loadLib(); }
   catch (e) { console.error(e); status("Nu s-a putut încărca unealta de decupat. Verifică internetul și încearcă iar.", true); setBusy(false); return; }
 
-  let added = 0, failed = 0;
+  let added = 0, failed = 0, skipped = 0;
   for (let i = 0; i < files.length; i++) {
     const tag = files.length > 1 ? ` (poza ${i + 1} din ${files.length})` : "";
     status(`Caut desenele${tag}…`);
     bar(i / files.length);
     try {
       const orig = await createImageBitmap(files[i]);
-      const regions = findRegions(orig);
+      const found = findRegions(orig), regions = dropRepeats(orig, found);
+      skipped += found.length - regions.length;
       for (let k = 0; k < regions.length; k++) {
         status(`Decupez desenul ${k + 1} din ${regions.length}${tag}…`);
         bar((i + k / regions.length) / files.length);
@@ -79,7 +80,8 @@ async function processFiles(files) {
   }
   bar(0); setBusy(false);
   const failText = failed ? ` ${failed} ${failed === 1 ? "poză nu a mers" : "poze nu au mers"}; încearcă-le din nou.` : "";
-  status((added ? `Gata: am găsit ${added} desene.` : "Nu am găsit niciun desen.") + failText, !added || failed > 0);
+  const skipText = skipped ? ` Am sărit ${skipped} ${skipped === 1 ? "copie identică" : "copii identice"}.` : "";
+  status((added ? `Gata: am găsit ${added} desene.` : "Nu am găsit niciun desen.") + skipText + failText, !added || failed > 0);
   renderPieces();
   if (!state.items.length && state.pieces.length) autoFill(false, false); else renderSheet();
 }
@@ -162,6 +164,34 @@ function findRegions(orig) {
     const X = Math.floor(bx0 / s), Y = Math.floor(by0 / s);
     return { x: X, y: Y, w: Math.min(W - X, Math.ceil(bw / s)), h: Math.min(H - Y, Math.ceil(bh / s)), mask: m, solid: sm };
   });
+}
+
+// The same object drawn several times in one picture (7 identical balls): cut out only the biggest copy.
+// Copies have the same shape and the same mix of colours (colour counts don't care if a ball is turned).
+// Measured: copies of a ball ≤ 0.10, two different cats ≥ 0.26.
+const REPEAT_LIMIT = 0.15;
+function repeatSig(orig, r) {
+  const t = canvas(64, 64), tx = t.getContext("2d", { willReadFrequently: true });
+  tx.drawImage(orig, r.x, r.y, r.w, r.h, 0, 0, 64, 64);
+  tx.globalCompositeOperation = "destination-in"; tx.drawImage(r.solid, 0, 0, 64, 64);
+  const d = tx.getImageData(0, 0, 64, 64).data, h = new Float32Array(64);
+  let n = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] < 128) continue;
+    h[((d[i] >> 6) << 4) | ((d[i + 1] >> 6) << 2) | (d[i + 2] >> 6)]++; n++;
+  }
+  return h.map(v => v / (n || 1));
+}
+function repeatDiff(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / 2; }
+function dropRepeats(orig, regions) {
+  if (regions.length < 2 || !regions[0].solid) return regions;
+  const list = regions.map((r, i) => ({ r, i, s: repeatSig(orig, r) })).sort((a, b) => b.r.w * b.r.h - a.r.w * a.r.h);
+  const kept = [];
+  for (const a of list) {
+    const same = kept.some(k => Math.abs(Math.log(a.r.w / a.r.h / (k.r.w / k.r.h))) < 0.15 && repeatDiff(a.s, k.s) < REPEAT_LIMIT);
+    if (!same) kept.push(a);
+  }
+  return kept.sort((a, b) => a.i - b.i).map(k => k.r);
 }
 
 // Plain background: the few colours that cover big parts of the picture, flooded in from the edges.

@@ -111,14 +111,14 @@ function findRegions(orig) {
 
   const fg = new Uint8Array(n);
   for (let i = 0; i < n; i++) fg[i] = bg[i] ? 0 : 1;
-  // Tall phone screenshot: ignore the status bar and the app's buttons when looking for pictures.
-  // shortcut: a picture reaching into the bottom 16.5% gets cropped there; fine for Pinterest screenshots so far.
-  if (H / W > 1.6) { fg.fill(0, 0, Math.round(h * 0.05) * w); fg.fill(0, Math.round(h * 0.835) * w); }
   const core = erode(fg, w, h, 1);
   const { lab, comps } = label(core, w, h);
   let biggest = 0;
   for (const c of comps) if (c.area > biggest) biggest = c.area;
   let keep = comps.filter(c => c.area >= biggest * 0.04 && c.area >= n * 0.002);
+  // Tall phone screenshot: drop pieces lying only in the status bar or the app's buttons. A picture that
+  // reaches into those strips (a tall PNG of a footballer) is kept whole.
+  if (H / W > 1.6) keep = keep.filter(c => !(c.y1 < h * 0.06) && !(c.y0 > h * 0.83));
   if (!keep.length) return whole;
   // A piece lying mostly inside another piece's box is part of the same picture (white icing on a
   // cookie's edge looks like background and slices a leg off), so merge it into the bigger one.
@@ -142,7 +142,7 @@ function findRegions(orig) {
   dropUnkept(lab, keep);
   const own = lab.slice();   // each picture's own shape, before it takes over nearby pixels
   grow(lab, w, h);
-  boxes(lab, fg, w, keep);
+  boxes(own, fg, w, keep);   // crop around the picture itself, not the app icons it took over
 
   return sortReading(keep, h).map(c => {
     const pad = Math.round(Math.max(c.x1 - c.x0, c.y1 - c.y0) * 0.04) + 4;

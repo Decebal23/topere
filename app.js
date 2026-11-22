@@ -1,4 +1,5 @@
 // Toppere A4: cut out pictures from screenshots and lay them out on a print-ready A4 sheet.
+import { THEMES, STYLES, searchWords, googleUrl, pinterestUrl } from "./theme.js";
 const BG_LIB = "https://esm.sh/@imgly/background-removal@1.4.5";
 const A4W = 2480, A4H = 3508;          // A4 at 300 DPI
 const MM = 300 / 25.4;                 // pixels per mm
@@ -453,6 +454,59 @@ $("share").addEventListener("click", async () => {
     try { await navigator.share({ files: [file], title: "Toppere A4" }); } catch (e) { if (e.name !== "AbortError") download(blob); }
   } else download(blob);
 });
+
+/* ---------- search for models ---------- */
+const themeSel = $("themeSel"), styleSel = $("styleSel"), themeText = $("themeText");
+themeSel.innerHTML = `<option value="">— alege —</option>` + THEMES.map(t => `<option value="${t.id}">${t.ro}</option>`).join("");
+styleSel.innerHTML = STYLES.map(s => `<option value="${s.id}">${s.ro}</option>`).join("");
+let guessed = [];
+
+function updateSearch() {
+  const theme = THEMES.find(t => t.id === themeSel.value), custom = themeText.value.trim();
+  const words = searchWords(theme, styleSel.value, custom);
+  $("searchWords").textContent = words ? `Caut: „${words}”` : "Alege o temă sau pune poza unui tort.";
+  for (const [id, url] of [["googleBtn", googleUrl], ["pinBtn", pinterestUrl]]) {
+    const a = $(id);
+    if (words) { a.href = url(words); a.removeAttribute("aria-disabled"); }
+    else { a.removeAttribute("href"); a.setAttribute("aria-disabled", "true"); }
+  }
+  $("themeChips").innerHTML = guessed.map(g =>
+    `<button type="button" data-theme="${g.item.id}" class="${g.item.id === themeSel.value && !custom ? "on" : ""}">${g.item.ro} ${Math.round(g.p * 100)}%</button>`).join("");
+}
+themeSel.addEventListener("change", () => { themeText.value = ""; updateSearch(); });
+styleSel.addEventListener("change", updateSearch);
+themeText.addEventListener("input", () => { if (themeText.value.trim()) themeSel.value = ""; updateSearch(); });
+$("themeChips").addEventListener("click", e => {
+  const b = e.target.closest("[data-theme]"); if (!b) return;
+  themeSel.value = b.dataset.theme; themeText.value = ""; updateSearch();
+});
+
+$("cakePhoto").addEventListener("change", async e => {
+  const file = e.target.files[0]; e.target.value = "";
+  if (!file) return;
+  const st = $("themeStatus"), btn = $("cakeBtn");
+  st.classList.remove("err"); btn.setAttribute("aria-disabled", "true");
+  st.textContent = "Mă uit la tort…";
+  try {
+    const { guess } = await import("./theme.js");
+    const res = await guess(file, p => {
+      if (p.status === "progress" && /\.onnx$/.test(p.file || "")) st.textContent = `Se descarcă unealta care recunoaște tema (doar prima dată)… ${Math.round(p.progress)}%`;
+    });
+    guessed = res.themes.slice(0, 3);
+    const top = guessed[0];
+    themeSel.value = top.item.id; styleSel.value = res.styles[0].item.id; themeText.value = "";
+    st.textContent = top.p >= 0.3
+      ? `Cred că e: ${top.item.ro}, ${res.styles[0].item.ro.toLowerCase()}. Dacă nu e bine, alege altă temă mai jos.`
+      : "Nu sunt sigur. Alege tema potrivită de mai jos sau scrie-o tu.";
+  } catch (err) {
+    console.error(err);
+    st.textContent = "Nu am putut recunoaște tema. Verifică internetul sau alege tema de mai jos.";
+    st.classList.add("err");
+  }
+  btn.removeAttribute("aria-disabled");
+  updateSearch();
+});
+updateSearch();
 
 /* ---------- start ---------- */
 $("files").addEventListener("change", e => { const f = [...e.target.files]; e.target.value = ""; processFiles(f); });

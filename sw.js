@@ -1,13 +1,17 @@
 // Adds the two headers browsers need before they let the cut-out use several processor cores.
 // GitHub Pages can't send these headers itself, so this service worker adds them to the app's own pages.
 self.addEventListener("install", () => self.skipWaiting());
-self.addEventListener("activate", e => e.waitUntil(self.clients.claim()));
+const MODEL_CACHE = "cutout-model-1.7.0";
+// Delete the old model version's files (44 MB) when a new version takes over.
+self.addEventListener("activate", e => e.waitUntil(
+  caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith("cutout-model-") && k !== MODEL_CACHE).map(k => caches.delete(k))))
+    .then(() => self.clients.claim())));
 self.addEventListener("fetch", e => {
   const req = e.request;
   // The cut-out model's files never change (their names are content hashes) but their server
   // doesn't tell phones to keep them, so keep them ourselves: download once, then load from storage.
   if (new URL(req.url).hostname === "staticimgly.com" && req.method === "GET") {
-    e.respondWith(caches.open("cutout-model-1.4.5").then(async cache => {
+    e.respondWith(caches.open(MODEL_CACHE).then(async cache => {
       const hit = await cache.match(req);
       if (hit) return hit;
       const res = await fetch(req);

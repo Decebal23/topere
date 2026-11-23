@@ -1,6 +1,6 @@
 // Toppere A4: cut out pictures from screenshots and lay them out on a print-ready A4 sheet.
 import { THEMES, STYLES, searchWords, googleUrl, pinterestUrl } from "./theme.js";
-const BG_LIB = "https://esm.sh/@imgly/background-removal@1.4.5";
+const BG_LIB = "https://esm.sh/@imgly/background-removal@1.7.0";
 const A4W = 2480, A4H = 3508;          // A4 at 300 DPI
 const MM = 300 / 25.4;                 // pixels per mm
 const GAP_MM = 2;
@@ -31,8 +31,24 @@ function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.fl
 
 /* ---------- 1. cut out ---------- */
 async function loadLib() {
-  if (!bgLib) bgLib = await import(BG_LIB);
+  if (bgLib) return bgLib;
+  // Graphics chip (WebGPU) when the phone has one: ~3× faster here, with the better model (~80 MB once).
+  // Otherwise the processor with the small model (~40 MB), as before.
+  let gpu = false;
+  try { gpu = !!(navigator.gpu && await navigator.gpu.requestAdapter()); } catch (e) {}
+  if (gpu) Object.assign(BG_CONFIG, { device: "gpu", model: "isnet_fp16" });
+  bgLib = await import(BG_LIB);
   return bgLib;
+}
+// If the graphics chip fails on this phone, switch to the processor for good and try again.
+async function cutOut(lib, blob) {
+  try { return await lib.removeBackground(blob, BG_CONFIG); }
+  catch (e) {
+    if (BG_CONFIG.device !== "gpu") throw e;
+    console.warn("Graphics chip failed, using the processor", e);
+    BG_CONFIG = { ...BG_CONFIG, device: "cpu", model: "isnet_quint8" };   // new object: the library keeps one AI per settings object
+    return lib.removeBackground(blob, BG_CONFIG);
+  }
 }
 
 async function processFiles(files) {
@@ -57,7 +73,7 @@ async function processFiles(files) {
         const r = regions[k];
         const crop = canvas(r.w, r.h);
         crop.getContext("2d").drawImage(orig, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
-        const blob = await lib.removeBackground(await toBlob(crop), BG_CONFIG);
+        const blob = await cutOut(lib, await toBlob(crop));
         const cut = await createImageBitmap(blob);
         const masked = canvas(r.w, r.h), mx = masked.getContext("2d");
         mx.drawImage(cut, 0, 0, r.w, r.h);
@@ -81,7 +97,7 @@ async function processFiles(files) {
   bar(0); setBusy(false);
   const failText = failed ? ` ${failed} ${failed === 1 ? "poză nu a mers" : "poze nu au mers"}; încearcă-le din nou.` : "";
   const skipText = skipped ? ` Am sărit ${skipped} ${skipped === 1 ? "copie identică" : "copii identice"}.` : "";
-  status((added ? `Gata: am găsit ${added} desene.` : "Nu am găsit niciun desen.") + skipText + failText, !added || failed > 0);
+  status((added ? `Gata: am găsit ${added === 1 ? "un desen" : added + " desene"}.` : "Nu am găsit niciun desen.") + skipText + failText, !added || failed > 0);
   renderPieces();
   if (!state.items.length && state.pieces.length) autoFill(false, false); else renderSheet();
 }
@@ -93,7 +109,7 @@ function onProgress(key, cur, total) {
   }
 }
 // One shared settings object: the library keeps its AI model loaded only while it gets the same object.
-const BG_CONFIG = { model: "small", output: { format: "image/png" }, progress: onProgress };
+let BG_CONFIG = { device: "cpu", model: "isnet_quint8", output: { format: "image/png" }, progress: onProgress };
 function toBlob(c) { return new Promise(r => c.toBlob(r, "image/png")); }
 
 // Step A: split the screenshot into one region per picture, using its plain background
@@ -168,17 +184,19 @@ function findRegions(orig) {
 
 // The same object drawn several times in one picture (7 identical balls): cut out only the biggest copy.
 // Copies have the same shape and the same mix of colours (colour counts don't care if a ball is turned).
-// Measured: copies of a ball ≤ 0.10, two different cats ≥ 0.26.
-const REPEAT_LIMIT = 0.15;
+// 512 colours. Measured: same-size ball copies ≤ 0.09 (small vs big ball 0.11-0.155),
+// F1 tyres that differ only by stripe colour ≥ 0.185, different cats ≥ 0.35.
+// 0.12 keeps a safe gap from the tyres; a big and a small copy of a ball may both stay.
+const REPEAT_LIMIT = 0.12;
 function repeatSig(orig, r) {
   const t = canvas(64, 64), tx = t.getContext("2d", { willReadFrequently: true });
   tx.drawImage(orig, r.x, r.y, r.w, r.h, 0, 0, 64, 64);
   tx.globalCompositeOperation = "destination-in"; tx.drawImage(r.solid, 0, 0, 64, 64);
-  const d = tx.getImageData(0, 0, 64, 64).data, h = new Float32Array(64);
+  const d = tx.getImageData(0, 0, 64, 64).data, h = new Float32Array(512);
   let n = 0;
   for (let i = 0; i < d.length; i += 4) {
     if (d[i + 3] < 128) continue;
-    h[((d[i] >> 6) << 4) | ((d[i + 1] >> 6) << 2) | (d[i + 2] >> 6)]++; n++;
+    h[((d[i] >> 5) << 6) | ((d[i + 1] >> 5) << 3) | (d[i + 2] >> 5)]++; n++;
   }
   return h.map(v => v / (n || 1));
 }
@@ -195,29 +213,50 @@ function dropRepeats(orig, regions) {
 }
 
 // Plain background: the few colours that cover big parts of the picture, flooded in from the edges.
+// 1. Colours that cover the picture's edge (white page, white phone border) flood in from the edge.
+// 2. Another colour joins only if it forms one big connected area (>10% of the picture) touching that:
+//    the grey behind Pinterest pictures does; black tyres and flags (many smaller areas) don't.
 function backgroundMask(op, w, h) {
-  const n = w * h, hist = new Map();
-  for (let i = 0; i < n; i++) {
-    const k = ((op[i * 4] >> 4) << 8) | ((op[i * 4 + 1] >> 4) << 4) | (op[i * 4 + 2] >> 4);
-    hist.set(k, (hist.get(k) || 0) + 1);
-  }
-  const pal = [...hist].filter(([, c]) => c > n * 0.05).sort((a, b) => b[1] - a[1]).slice(0, 4)
-    .map(([k]) => [((k >> 8) & 15) * 16 + 8, ((k >> 4) & 15) * 16 + 8, (k & 15) * 16 + 8]);
-  const bg = new Uint8Array(n);
-  if (!pal.length) return bg;
-  const T2 = 24 * 24;
-  const near = i => pal.some(([r, g, b]) => { const dr = op[i * 4] - r, dg = op[i * 4 + 1] - g, db = op[i * 4 + 2] - b; return dr * dr + dg * dg + db * db < T2; });
-  const q = new Int32Array(n);
-  let qh = 0, qt = 0;
-  const seed = i => { if (!bg[i] && near(i)) { bg[i] = 1; q[qt++] = i; } };
-  for (let x = 0; x < w; x++) { seed(x); seed((h - 1) * w + x); }
-  for (let y = 0; y < h; y++) { seed(y * w); seed(y * w + w - 1); }
-  while (qh < qt) {
-    const p = q[qh++], x = p % w;
-    if (x > 0) seed(p - 1);
-    if (x < w - 1) seed(p + 1);
-    if (p >= w) seed(p - w);
-    if (p < n - w) seed(p + w);
+  const n = w * h, T2 = 24 * 24;
+  const key = i => ((op[i * 4] >> 4) << 8) | ((op[i * 4 + 1] >> 4) << 4) | (op[i * 4 + 2] >> 4);
+  const centre = k => [((k >> 8) & 15) * 16 + 8, ((k >> 4) & 15) * 16 + 8, (k & 15) * 16 + 8];
+  const near = (i, [r, g, b]) => { const dr = op[i * 4] - r, dg = op[i * 4 + 1] - g, db = op[i * 4 + 2] - b; return dr * dr + dg * dg + db * db < T2; };
+  const count = idx => { const m = new Map(); for (const i of idx) m.set(key(i), (m.get(key(i)) || 0) + 1); return m; };
+  const edge = [];
+  for (let x = 0; x < w; x++) edge.push(x, (h - 1) * w + x);
+  for (let y = 0; y < h; y++) edge.push(y * w, y * w + w - 1);
+
+  const bg = new Uint8Array(n), q = new Int32Array(n);
+  // Flood from seeds over pixels near pal into mask; returns how many pixels it took.
+  const flood = (mask, seeds, pal) => {
+    let qh = 0, qt = 0;
+    const take = i => { if (!bg[i] && !mask[i] && pal.some(p => near(i, p))) { mask[i] = 1; q[qt++] = i; } };
+    seeds.forEach(take);
+    while (qh < qt) {
+      const p = q[qh++], x = p % w;
+      if (x > 0) take(p - 1);
+      if (x < w - 1) take(p + 1);
+      if (p >= w) take(p - w);
+      if (p < n - w) take(p + w);
+    }
+    return qt;
+  };
+  const edgePal = [...count(edge)].filter(([, c]) => c > edge.length * 0.1).map(([k]) => centre(k));
+  if (!edgePal.length) return bg;
+  flood(bg, edge, edgePal);
+
+  const all = new Array(n); for (let i = 0; i < n; i++) all[i] = i;
+  for (const [k, c] of count(all)) {
+    const col = centre(k);
+    if (c < n * 0.1 || edgePal.some(p => (p[0] - col[0]) ** 2 + (p[1] - col[1]) ** 2 + (p[2] - col[2]) ** 2 < T2)) continue;
+    const seeds = [];
+    for (let i = 0; i < n; i++) {
+      if (bg[i] || !near(i, col)) continue;
+      const x = i % w;
+      if ((x > 0 && bg[i - 1]) || (x < w - 1 && bg[i + 1]) || (i >= w && bg[i - w]) || (i < n - w && bg[i + w])) seeds.push(i);
+    }
+    const area = new Uint8Array(n);
+    if (flood(area, seeds, [col]) > n * 0.1) for (let i = 0; i < n; i++) if (area[i]) bg[i] = 1;
   }
   return bg;
 }
